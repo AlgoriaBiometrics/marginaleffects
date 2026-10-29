@@ -34,14 +34,25 @@ class ModelStatsmodels(ModelAbstract):
         vault.variable_names = [
             model.model.endog_names
         ] + fml.extract_patsy_variable_names(vault.formula, vault.modeldata)
-        if not hasattr(model, "formula"):
+
+        # Replay the fitted encoding: Formulaic and Patsy can order the same
+        # interaction terms differently, and transforms have fitted state.
+        vault.model_spec = getattr(
+            model.model.data.orig_exog, "model_spec", vault.model_spec
+        )
+        native_spec = getattr(model.model.data, "model_spec", None)
+        if isinstance(native_spec, patsy.DesignInfo):
+            vault.design_info_patsy = native_spec
+        elif native_spec is not None:
+            vault.model_spec = native_spec
+        if vault.model_spec is None and not hasattr(model, "formula"):
             vault.formula_engine = "patsy"
             if hasattr(model.model.data, "design_info"):
                 vault.design_info_patsy = model.model.data.design_info
         super().__init__(model, vault)
 
     def get_exog(self, newdata: pl.DataFrame):
-        """Build design matrix using patsy for statsmodels models."""
+        """Build a prediction matrix with the fitted model's encoding."""
         import re
 
         if self.vault.design_info_patsy is not None:
@@ -51,6 +62,12 @@ class ModelStatsmodels(ModelAbstract):
 
         if callable(f):
             _, exog = f(newdata)
+        elif self.vault.model_spec is not None:
+            exog = self.vault.model_spec.get_model_matrix(
+                newdata.to_pandas(), context={"np": np}
+            )
+        elif self.vault.design_info_patsy is not None:
+            exog = patsy.build_design_matrices([f], newdata.to_pandas())[0]
         elif self.vault.formula_engine == "patsy":
             fml_rhs = re.sub(
                 r".*~", "", f if isinstance(f, str) else self.get_formula()
